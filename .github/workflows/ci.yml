@@ -1,0 +1,65 @@
+name: CI — Build & Upload Lambda JAR
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, sit, uat, prod]
+        default: dev
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-upload:
+    name: Build & Upload to S3
+    runs-on: [self-hosted, docker, linux]
+
+    env:
+      AWS_REGION:   us-east-1
+      ENVIRONMENT:  ${{ inputs.environment || 'dev' }}
+      S3_BUCKET:    school-lambda-jar-497041484428-${{ inputs.environment || 'dev' }}
+      S3_KEY:       school-api-lambda.jar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build fat JAR
+        run: mvn clean package -q
+
+      - name: Upload JAR to S3
+        run: |
+          aws s3 cp target/school-api-lambda-*.jar \
+            s3://${S3_BUCKET}/${S3_KEY} \
+            --region ${AWS_REGION}
+          echo "Uploaded to s3://${S3_BUCKET}/${S3_KEY}"
+
+      - name: Update Lambda function code
+        run: |
+          FUNCTION_NAME="school-api-${ENVIRONMENT}"
+
+          # Check if Lambda exists
+          if aws lambda get-function --function-name "$FUNCTION_NAME" \
+               --region "$AWS_REGION" > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name "$FUNCTION_NAME" \
+              --s3-bucket "$S3_BUCKET" \
+              --s3-key "$S3_KEY" \
+              --region "$AWS_REGION"
+            echo "Lambda $FUNCTION_NAME updated"
+          else
+            echo "Lambda $FUNCTION_NAME not found — skipping update (run Terraform first)"
+          fi
